@@ -2,7 +2,7 @@
 #include <thread>
 
 struct Particle {
-    float x, y, hue;
+    cl_float x, y, hue;
     cl_bool solid;
 };
 
@@ -10,7 +10,7 @@ struct Particle {
 class ParticleSystem {
 private:
     int particleCount;
-    std::vector<Particle> particles;
+    std::vector<Particle> active, solid;
     Vector2u size;
     VertexArray vertexArray;
     std::vector<Vertex> offsets;
@@ -18,43 +18,25 @@ private:
     float circleRadius;
 
     OpenCLHelper ocl;
+    int err;
 
     Kernel collisionKernel;
-    cl_mem collisionBuffer;
+    cl_mem activeBuffer;
+    cl_mem solidBuffer;
+    cl_mem solidLengthBuffer;
+    std::vector<cl_int> l;
 
     std::default_random_engine eng;
     std::uniform_real_distribution<float> distx;
     std::uniform_real_distribution<float> disty;
-    void updateParticles(int start, int end) {
-        for (int i = start; i < end; ++i) {
-            if (particles[i].solid) {
-                continue;
-            }
-            particles[i].x += ((float)rand() / (float)RAND_MAX * 2.f - 1.f) * 10.f;
-            particles[i].y += ((float)rand() / (float)RAND_MAX * 2.f - 1.f) * 10.f;
-
-            if (particles[i].x < 0.f) {
-                particles[i].x = size.x;
-            }
-            else if (particles[i].x > size.x) {
-                particles[i].x = 0.f;
-            }
-
-            if (particles[i].y < 0.f) {
-                particles[i].y = size.y;
-            }
-            else if (particles[i].y > size.y) {
-                particles[i].y = 0.f;
-            }
-        }
-    }
 public:
     ParticleSystem(int particleCount, Vector2u size) {
+        this->err = CL_SUCCESS;
         this->particleCount = particleCount;
         this->size = size;
         this->vertexArray = VertexArray(PrimitiveType::Triangles);
 
-        ocl.createKernel("particle_check_col.cl", "particle_check_col", collisionKernel);
+        ocl.createKernel("collide.cl", "main", collisionKernel);
         
 
         #pragma region Cache Particle Shape
@@ -91,110 +73,90 @@ public:
         disty = std::uniform_real_distribution<float>(0.f, size.y);
 
         Particle p;
-        for (int i = 0; i < particleCount - 1; ++i) {
+        for (int i = 0; i < particleCount; ++i) {
             p.x = distx(eng);
             p.y = disty(eng);
             p.solid = false;
 
-            particles.push_back(p);
+            active.push_back(p);
         }
 
         p.x = size.x / 2.f;
         p.y = size.y / 2.f;
         p.solid = true;
 
-        particles.push_back(p);
+        solid.push_back(p);
         #pragma endregion
 
-        collisionBuffer = ocl.createBuffer<Particle>(particles, CL_MEM_READ_WRITE);
+        solidBuffer = ocl.createBuffer<Particle>(solid, CL_MEM_WRITE_ONLY);
+        l = { (cl_int)solid.size() };
+        solidLengthBuffer = ocl.createBuffer<cl_int>(l, CL_MEM_WRITE_ONLY);
+        activeBuffer = ocl.createBuffer<Particle>(active, CL_MEM_READ_WRITE);
     }
 
     void update(const float& deltaTime) {
+        // Loop through all actives and update them
+        for (int i = 0; i < active.size(); ++i) {
+            active[i].x += ((float)rand() / (float)RAND_MAX * 2.f - 1.f);
+            active[i].y += ((float)rand() / (float)RAND_MAX * 2.f - 1.f);
 
-        //std::thread second(updateParticles, 0, 1000);
-
-
-        int count = 0;
-        for (int i = 0; i < particles.size(); ++i) {
-            if (particles[i].solid) {
-                count++;
-                continue;
+            if (active[i].x < 0.f) {
+                active[i].x = size.x;
             }
-            particles[i].x += ((float)rand() / (float)RAND_MAX * 2.f - 1.f) * 10.f;
-            particles[i].y += ((float)rand() / (float)RAND_MAX * 2.f - 1.f) * 10.f;
-            
-            if (particles[i].x < 0.f) {
-                particles[i].x = size.x;
-            }
-            else if (particles[i].x > size.x) {
-                particles[i].x = 0.f;
+            else if (active[i].x > size.x) {
+                active[i].x = 0.f;
             }
 
-            if (particles[i].y < 0.f) {
-                particles[i].y = size.y;
+            if (active[i].y < 0.f) {
+                active[i].y = size.y;
             }
-            else if (particles[i].y > size.y) {
-                particles[i].y = 0.f;
+            else if (active[i].y > size.y) {
+                active[i].y = 0.f;
             }
-
-            
-
-            /*
-            
-            std::cout << ocl.writeToBuffer(collisionKernel, particles, collisionBuffer) << std::endl;
-            std::cout << ocl.writeArg<cl_mem>(collisionKernel, 0, collisionBuffer) << std::endl;
-
-            std::cout << ocl.runKernel(collisionKernel, particles.size(), particles.size()) << std::endl;
-
-            std::cout << ocl.readArg<Particle>(0, collisionBuffer, &particles[0], particles.size()) << std::endl;*/
         }
 
-        Particle p;
-        p.x = distx(eng);
-        p.y = disty(eng);
-        p.solid = false;
 
-        //particles.push_back(p);
+        err = ocl.writeToBuffer(collisionKernel, solid, solidBuffer);
+        err = ocl.writeArg<cl_mem>(collisionKernel, 0, solidBuffer);
 
-        /*
-        Particle p;
-        while (particles.size() - count <= particleCount) {
-            p.x = distx(eng);
-            p.y = disty(eng);
-            p.solid = false;
+        l[0] = solid.size();
+        err = ocl.writeToBuffer(collisionKernel, l, solidLengthBuffer);
+        err = ocl.writeArg<cl_mem>(collisionKernel, 1, solidLengthBuffer);
 
-            particles.push_back(p);
+        err = ocl.writeToBuffer(collisionKernel, active, activeBuffer);
+        err = ocl.writeArg<cl_mem>(collisionKernel, 2, activeBuffer);
+
+        err = ocl.runKernel(collisionKernel, active.size(), 1000);
+
+        err = ocl.readArg<Particle>(2, activeBuffer, &active[0], active.size());
+
+        // Loop through actives and if they're solid, move them to the solid vector
+        for (int i = active.size() - 1; i >= 0; --i) {
+            if (active[i].solid) {
+                // Remove from active, move to solid
+                solid.push_back(active[i]);
+                active.erase(active.begin() + i);
+            }
         }
-        //*/
-
-        int erro = ocl.writeToBuffer(collisionKernel, particles, collisionBuffer);
-        erro = ocl.writeArg<cl_mem>(collisionKernel, 0, collisionBuffer);
-
-        erro = ocl.runKernel(collisionKernel, particles.size(), 1000);
-
-        erro = ocl.readArg<Particle>(0, collisionBuffer, &particles[0], particles.size());
-
+        printf("Active: %i\nSolid: %i\n", active.size(), solid.size());
     }
 
     void render(RenderWindow& window, const float& dT) {
-        int count = 0;
-        for (int i = 0; i < particles.size(); ++i) {
-            if (particles[i].solid) count++;
+        window.setTitle(std::to_string(solid.size()));
+
+        vertexArray.resize((active.size() + solid.size()) / 2 * vertexCount * 3 * 3);
+        Color col = Color::Blue;
+        for (int i = 0; i < active.size(); ++i) {
+            Vector2f v{ active[i].x, active[i].y };
+            for (int j = 0; j < vertexCount * 3; j += 3) {
+                vertexArray.append(Vertex{ offsets[j].position + v, col });
+                vertexArray.append(Vertex{ offsets[j + 1].position + v, col });
+                vertexArray.append(Vertex{ offsets[j + 2].position + v, col });
+            }
         }
-        window.setTitle(std::to_string(count));
-
-        vertexArray.resize(particles.size() / 2 * vertexCount * 3 * 3);
-        for (int i = 0; i < particles.size(); ++i) {
-            Color col;
-            if (particles[i].solid) {
-                col = Color::Cyan;
-            }
-            else {
-                col = Color::Blue;
-            }
-
-
-            Vector2f v{ particles[i].x, particles[i].y };
+        col = Color::Cyan;
+        for (int i = 0; i < solid.size(); ++i) {
+            Vector2f v{ solid[i].x, solid[i].y };
             for (int j = 0; j < vertexCount * 3; j += 3) {
                 vertexArray.append(Vertex{ offsets[j].position + v, col });
                 vertexArray.append(Vertex{ offsets[j + 1].position + v, col });

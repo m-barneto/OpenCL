@@ -14,6 +14,7 @@ struct Kernel {
     cl_kernel kernel;
 };
 
+// TODO, change this to a namespace
 class OpenCLHelper {
 private:
     cl_platform_id platformID;
